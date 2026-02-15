@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+import inquirer
+from inquirer.themes import BlueComposure
 
 from utils import MigrationLogger, load_config, clean_token
 from clients import DiscordHTTPClient, FluxerClient
@@ -105,29 +107,140 @@ class MigrationOrchestrator:
         return await migrator.migrate()
 
     def select_servers(self) -> list[dict[str, Any]]:
-        """Interactive server selection."""
+        """Interactive server selection with checkbox interface."""
         if not self.discord_guilds or not self.discord_user:
             return []
 
-        # Get only servers the user owns
         user_id = self.discord_user["id"]
-        owned_guilds = [g for g in self.discord_guilds if g.get("owner") or g.get("owner_id") == user_id]
+        all_guilds = self.discord_guilds
 
-        if not owned_guilds:
-            self.logger.log("You don't own any servers", "WARN")
+        if not all_guilds:
+            self.logger.log("You're not in any servers", "WARN")
             return []
 
+        # Separate owned and non-owned servers
+        owned_guilds = [g for g in all_guilds if (g.get("owner") or g.get("owner_id") == user_id)]
+
         print("\n" + "=" * 80)
-        print("SERVERS YOU OWN")
+        print("SERVER MIGRATION - SELECT SERVERS")
+        print("=" * 80)
+        print(f"\nYou're in {len(all_guilds)} server(s)")
+        print(f"You own {len(owned_guilds)} server(s)")
+        print("\nNote: You can copy ANY server you're in, even if you don't own it!")
+        print("\nℹ️  Navigation: Use arrow keys to move, Enter to select, Ctrl+C to cancel")
+
+        # Step 1: Ask what to show
+        questions = [
+            inquirer.List(
+                'filter',
+                message="Which servers do you want to see?",
+                choices=[
+                    ('All servers you\'re in', 'all'),
+                    ('Only servers you own', 'owned'),
+                    ('Cancel server migration', 'cancel')
+                ],
+            ),
+        ]
+
+        try:
+            answers = inquirer.prompt(questions, theme=BlueComposure())
+
+            if not answers or answers['filter'] == 'cancel':
+                return []
+
+            # Filter guilds based on selection
+            guilds_to_show = owned_guilds if answers['filter'] == 'owned' else all_guilds
+
+            if not guilds_to_show:
+                print("\nNo servers found with the selected filter.")
+                return []
+
+            # Step 2: Build checkbox choices
+            checkbox_choices = []
+            for guild in guilds_to_show:
+                member_count = guild.get("approximate_member_count", "?")
+                owner_indicator = " [OWNER]" if (guild.get("owner") or guild.get("owner_id") == user_id) else ""
+                display_name = f"{guild['name']} ({member_count} members){owner_indicator}"
+                checkbox_choices.append((display_name, guild))
+
+            # Step 3: Ask for selection method
+            selection_questions = [
+                inquirer.List(
+                    'selection_mode',
+                    message="How do you want to select servers?",
+                    choices=[
+                        ('Select servers manually (use arrow keys + space bar)', 'manual'),
+                        ('Select ALL displayed servers', 'all'),
+                        ('Cancel', 'cancel')
+                    ],
+                ),
+            ]
+
+            selection_answers = inquirer.prompt(selection_questions, theme=BlueComposure())
+
+            if not selection_answers or selection_answers['selection_mode'] == 'cancel':
+                return []
+
+            # If "select all", return all displayed guilds
+            if selection_answers['selection_mode'] == 'all':
+                print(f"\n✓ Selected all {len(guilds_to_show)} server(s)")
+                return guilds_to_show
+
+            # Step 4: Show checkbox interface
+            print("\n" + "=" * 80)
+            print("SELECT SERVERS TO MIGRATE")
+            print("=" * 80)
+            print("Use arrow keys to navigate, SPACE to select/deselect, ENTER to confirm")
+            print("Press Ctrl+C to cancel and go back")
+            print("=" * 80 + "\n")
+
+            checkbox_questions = [
+                inquirer.Checkbox(
+                    'servers',
+                    message="Select the servers you want to migrate (space to toggle, enter to confirm)",
+                    choices=checkbox_choices,
+                ),
+            ]
+
+            checkbox_answers = inquirer.prompt(checkbox_questions, theme=BlueComposure())
+
+            if not checkbox_answers or not checkbox_answers.get('servers'):
+                print("\nNo servers selected.")
+                return []
+
+            selected_guilds = checkbox_answers['servers']
+            print(f"\n✓ Selected {len(selected_guilds)} server(s)")
+            return selected_guilds
+
+        except KeyboardInterrupt:
+            print("\n\nServer selection cancelled.")
+            return []
+        except Exception as e:
+            # Fallback to old method if inquirer fails (e.g., on unsupported terminals)
+            print(f"\n⚠ Interactive selection not available: {e}")
+            print("Falling back to manual input method...\n")
+            return self._select_servers_fallback(all_guilds, owned_guilds, user_id)
+
+    def _select_servers_fallback(
+        self,
+        all_guilds: list[dict[str, Any]],
+        owned_guilds: list[dict[str, Any]],
+        user_id: str
+    ) -> list[dict[str, Any]]:
+        """Fallback server selection method (manual typing)."""
+        print("\n" + "=" * 80)
+        print("YOUR DISCORD SERVERS")
         print("=" * 80)
 
-        for i, guild in enumerate(owned_guilds, 1):
+        for i, guild in enumerate(all_guilds, 1):
             member_count = guild.get("approximate_member_count", "?")
-            print(f"  [{i}] {guild['name']} ({member_count} members)")
+            owner_indicator = " [OWNER]" if (guild.get("owner") or guild.get("owner_id") == user_id) else ""
+            print(f"  [{i}] {guild['name']} ({member_count} members){owner_indicator}")
 
         print("\nOptions:")
         print("  • Enter numbers separated by commas (e.g., 1,3,5)")
         print("  • Enter 'all' to select all servers")
+        print("  • Enter 'owned' to select all servers you own")
         print("  • Enter 'cancel' to skip server migration")
 
         while True:
@@ -137,11 +250,14 @@ class MigrationOrchestrator:
                 return []
 
             if choice == "all":
+                return all_guilds
+
+            if choice == "owned":
                 return owned_guilds
 
             try:
                 indices = [int(x.strip()) for x in choice.split(",")]
-                selected = [owned_guilds[i - 1] for i in indices if 1 <= i <= len(owned_guilds)]
+                selected = [all_guilds[i - 1] for i in indices if 1 <= i <= len(all_guilds)]
 
                 if selected:
                     return selected
@@ -162,7 +278,8 @@ class MigrationOrchestrator:
         print("\nWhat would you like to migrate?")
         print("  [1] Everything (roles, channels, permissions, emojis)")
         print("  [2] Custom selection")
-        print("  [3] Cancel")
+        print("  [3] Go back / Cancel")
+        print("\nℹ️  Navigation: Enter a number, or press Ctrl+C to go back")
 
         choice = input("\nYour choice: ").strip()
 
@@ -222,26 +339,37 @@ class MigrationOrchestrator:
     async def select_fluxer_guild_for_migration(
         self,
         discord_guild: dict[str, Any]
-    ) -> str | None:
+    ) -> tuple[str | None, bool]:
         """Ask user if they want to create new or use existing Fluxer guild.
 
         Returns:
-            Fluxer guild ID if using existing, None if creating new
+            Tuple of (Fluxer guild ID or None if creating new, partial_sync boolean)
         """
         print("\n" + "=" * 80)
         print(f"Discord Server: {discord_guild['name']}")
         print("=" * 80)
         print("\nWhere do you want to migrate this server?")
         print("  [1] Create a NEW Fluxer server")
-        print("  [2] Add to an EXISTING Fluxer server")
-        print("  [3] Skip this server")
+        print("  [2] Add to an EXISTING Fluxer server (adds everything)")
+        print("  [3] Add MISSING PARTS only (smart sync - matches by name)")
+        print("  [4] Skip this server / Go back")
+        print("\nℹ️  Navigation: Enter a number, or press Ctrl+C to go back")
 
         choice = input("\nYour choice: ").strip()
 
         if choice == "1":
-            return None  # Create new
+            return (None, False)  # Create new, no partial sync
 
-        elif choice == "2":
+        elif choice in ["2", "3"]:
+            # Both options need to select an existing server
+            partial_sync = (choice == "3")
+
+            if partial_sync:
+                print("\n⚡ Smart Sync Mode Selected!")
+                print("   Fetching your Fluxer servers...")
+            else:
+                print("\nFetching your Fluxer servers...")
+
             # Fetch Fluxer guilds
             try:
                 fluxer_guilds = await self.fluxer_http.get_current_user_guilds()
@@ -249,7 +377,7 @@ class MigrationOrchestrator:
                 if not fluxer_guilds:
                     print("\nYou're not in any Fluxer servers yet!")
                     print("Creating a new server instead...")
-                    return None
+                    return (None, False)
 
                 print("\n" + "=" * 80)
                 print("YOUR FLUXER SERVERS")
@@ -263,31 +391,61 @@ class MigrationOrchestrator:
                     guild_choice = input("\nSelect a server (or 'cancel'): ").strip()
 
                     if guild_choice.lower() == "cancel":
-                        return None
+                        return ("SKIP", False)
 
                     try:
                         idx = int(guild_choice) - 1
                         if 0 <= idx < len(fluxer_guilds):
                             selected_guild = fluxer_guilds[idx]
-                            print(f"\n✓ Will migrate into: {selected_guild['name']}")
-                            print("  (Roles and channels will be ADDED, nothing will be deleted)")
-                            return selected_guild["id"]
+
+                            if partial_sync:
+                                print(f"\n✓ Will sync missing parts to: {selected_guild['name']}")
+                                print("  ⚠ WARNING: This matches by exact name!")
+                                print("  - Existing roles/channels/emojis will be SKIPPED")
+                                print("  - Only MISSING items will be added")
+                                print("  - Permissions will be updated for matched channels")
+                                print("  - May result in duplicates if names don't match exactly")
+                                print("\n  Starting smart sync in a moment...")
+                            else:
+                                print(f"\n✓ Will migrate into: {selected_guild['name']}")
+                                print("  (Roles and channels will be ADDED, nothing will be deleted)")
+                                print("\n  Starting migration in a moment...")
+
+                            return (selected_guild["id"], partial_sync)
                         else:
                             print("Invalid selection. Try again.")
                     except ValueError:
                         print("Invalid input. Try again.")
 
             except Exception as e:
-                print(f"\nError fetching Fluxer servers: {e}")
-                print("Creating a new server instead...")
-                return None
+                error_msg = str(e)
+                print(f"\n❌ Error fetching Fluxer servers: {error_msg}")
 
-        elif choice == "3":
-            return "SKIP"
+                # Check if it's a 500 error (server-side issue)
+                if "500" in error_msg or "Server error" in error_msg:
+                    print("\n🔴 Fluxer API is experiencing server issues (Error 500)")
+                    print("   This is a problem on Fluxer's side, not yours.")
+                    print("\n   What to do:")
+                    print("   - Wait a few minutes and try again")
+                    print("   - Check Fluxer's status page / Discord")
+                    print("   - Or create a new server instead (option below)")
+                else:
+                    print("\nPossible causes:")
+                    print("  - Your Fluxer token might be invalid/expired")
+                    print("  - Network connection issue")
+
+                retry = input("\nCreate new server instead? (y/n): ").strip().lower()
+                if retry == 'y':
+                    return (None, False)
+                else:
+                    return ("SKIP", False)
+
+        elif choice == "4":
+            return ("SKIP", False)
 
         else:
             print("Invalid choice. Skipping this server.")
-            return "SKIP"
+            return ("SKIP", False)
 
     async def migrate_servers(self, servers: list[dict[str, Any]]):
         """Migrate multiple servers."""
@@ -302,7 +460,7 @@ class MigrationOrchestrator:
                 continue
 
             # Ask where to migrate this guild
-            fluxer_guild_id = await self.select_fluxer_guild_for_migration(guild)
+            fluxer_guild_id, partial_sync = await self.select_fluxer_guild_for_migration(guild)
 
             if fluxer_guild_id == "SKIP":
                 print(f"\nSkipping {guild['name']}")
@@ -311,7 +469,8 @@ class MigrationOrchestrator:
             await server_migrator.migrate_server(
                 guild,
                 existing_fluxer_guild_id=fluxer_guild_id,
-                migration_options=migration_options
+                migration_options=migration_options,
+                partial_sync=partial_sync
             )
             # Small delay between servers
             await asyncio.sleep(1)
@@ -371,28 +530,29 @@ class MigrationOrchestrator:
                 print("MIGRATION OPTIONS")
                 print("=" * 80)
                 print("  [1] Migrate Profile")
-                # print("  [2] Migrate Servers")
-                # print("  [3] Migrate Profile + Servers")
-                print("  [2] Exit")
+                print("  [2] Migrate Servers")
+                print("  [3] Migrate Profile + Servers")
+                print("  [4] Exit")
+                print("\nℹ️  Navigation: Enter a number, or press Ctrl+C to exit")
 
                 choice = input("\nYour choice: ").strip()
 
                 if choice == "1":
                     await self.migrate_profile()
 
-                # elif choice == "2":
-                #     servers = self.select_servers()
-                #     if servers:
-                #         await self.migrate_servers(servers)
-
-                # elif choice == "3":
-                #     await self.migrate_profile()
-                #     print("\n")
-                #     servers = self.select_servers()
-                #     if servers:
-                #         await self.migrate_servers(servers)
-
                 elif choice == "2":
+                    servers = self.select_servers()
+                    if servers:
+                        await self.migrate_servers(servers)
+
+                elif choice == "3":
+                    await self.migrate_profile()
+                    print("\n")
+                    servers = self.select_servers()
+                    if servers:
+                        await self.migrate_servers(servers)
+
+                elif choice == "4":
                     break
 
                 else:
