@@ -62,8 +62,8 @@ class DiscordHTTPClient:
         return user_data
 
     async def get_guilds(self) -> list[dict[str, Any]]:
-        """GET /users/@me/guilds"""
-        return await self.request("GET", "/users/@me/guilds")
+        """GET /users/@me/guilds with member counts"""
+        return await self.request("GET", "/users/@me/guilds?with_counts=true")
 
     async def get_guild(self, guild_id: str) -> dict[str, Any]:
         """GET /guilds/{guild_id}"""
