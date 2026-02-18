@@ -37,11 +37,10 @@ class ServerMigrator:
         try:
             from apnggif import apnggif
 
-            with tempfile.NamedTemporaryFile(
-                suffix=".png", delete=False
-            ) as png_f, tempfile.NamedTemporaryFile(
-                suffix=".gif", delete=False
-            ) as gif_f:
+            with (
+                tempfile.NamedTemporaryFile(suffix=".png", delete=False) as png_f,
+                tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as gif_f,
+            ):
                 png_path = png_f.name
                 gif_path = gif_f.name
             try:
@@ -705,10 +704,12 @@ class ServerMigrator:
                 continue
 
             # Build emoji URL
-            emoji_ext = "gif" if animated else "png"
+            emoji_ext = "webp" if animated else "png"
             emoji_url = (
                 f"https://cdn.discordapp.com/emojis/{emoji_id}.{emoji_ext}?size=128"
             )
+            if animated:
+                emoji_url += "&animated=true"
 
             self.logger.log(
                 f"Migrating emoji: :{emoji_name}: {'(animated)' if animated else ''}"
