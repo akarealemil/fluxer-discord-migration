@@ -3,6 +3,8 @@ A tool to migrate your Profile and all Servers from Discord to Fluxer.
 
 This works as a self-bot so perform it at your own risk. You require your Fluxer User Token and Discord User Token to be able to operate this.
 
+For support join https://fluxer.gg/fluxer-py
+
 ## Dependencies
 You need Python 3 installed, as well as all some other dependencies, you can run `pip install -r requirements.txt` to get any requirements installed.
 
