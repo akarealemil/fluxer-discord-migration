@@ -1,7 +1,10 @@
 """Server migration from Discord to Fluxer."""
 
-from typing import Any
 import asyncio
+import tempfile
+from pathlib import Path
+from typing import Any
+
 import aiohttp
 
 
@@ -29,12 +32,35 @@ class ServerMigrator:
             self.logger.log(f"Failed to download image: {e}", "ERROR")
         return None
 
+    def _apng_to_gif(self, apng_data: bytes) -> bytes | None:
+        """Convert APNG bytes to GIF bytes. Returns None on failure."""
+        try:
+            from apnggif import apnggif
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".png", delete=False
+            ) as png_f, tempfile.NamedTemporaryFile(
+                suffix=".gif", delete=False
+            ) as gif_f:
+                png_path = png_f.name
+                gif_path = gif_f.name
+            try:
+                Path(png_path).write_bytes(apng_data)
+                apnggif(png_path, gif_path)
+                return Path(gif_path).read_bytes()
+            finally:
+                Path(png_path).unlink(missing_ok=True)
+                Path(gif_path).unlink(missing_ok=True)
+        except Exception as e:
+            self.logger.log(f"APNG to GIF conversion failed: {e}", "WARN")
+            return None
+
     async def migrate_server(
         self,
         discord_guild: dict[str, Any],
         existing_fluxer_guild_id: str | None = None,
         migration_options: dict[str, bool] | None = None,
-        partial_sync: bool = False
+        partial_sync: bool = False,
     ) -> bool:
         """Migrate a single Discord server to Fluxer.
 
@@ -46,15 +72,17 @@ class ServerMigrator:
                               - 'roles': Migrate roles (default True)
                               - 'channels': Migrate channels (default True)
                               - 'emojis': Migrate emojis (default True)
+                              - 'stickers': Migrate stickers (default True)
                               - 'permissions': Migrate channel permissions (default True)
             partial_sync: If True, only adds missing items (matches by name). Default False.
         """
         if migration_options is None:
             migration_options = {
-                'roles': True,
-                'channels': True,
-                'emojis': True,
-                'permissions': True
+                "roles": True,
+                "channels": True,
+                "emojis": True,
+                "stickers": True,
+                "permissions": True,
             }
         guild_name = discord_guild["name"]
         guild_id = discord_guild["id"]
@@ -71,9 +99,13 @@ class ServerMigrator:
                 fluxer_guild_id = existing_fluxer_guild_id
                 self.logger.log(f"Using existing Fluxer guild: {fluxer_guild_id}")
                 if partial_sync:
-                    self.logger.log("⚡ SMART SYNC MODE: Will match by name and add only missing items")
+                    self.logger.log(
+                        "⚡ SMART SYNC MODE: Will match by name and add only missing items"
+                    )
                 else:
-                    self.logger.log("(Will add roles and channels, won't delete anything)")
+                    self.logger.log(
+                        "(Will add roles and channels, won't delete anything)"
+                    )
             else:
                 self.logger.log(f"Creating new guild: {guild_name}")
 
@@ -98,16 +130,30 @@ class ServerMigrator:
             # Fetch existing Fluxer items if doing partial sync
             existing_fluxer_items = {}
             if partial_sync and existing_fluxer_guild_id:
-                self.logger.log("Fetching existing Fluxer server data for partial sync...")
+                self.logger.log(
+                    "Fetching existing Fluxer server data for partial sync..."
+                )
                 try:
-                    if migration_options.get('roles', True):
-                        existing_fluxer_items['roles'] = await self.fluxer_http.get_guild_roles(fluxer_guild_id)
-                    if migration_options.get('channels', True):
-                        existing_fluxer_items['channels'] = await self.fluxer_http.get_guild_channels(fluxer_guild_id)
-                    if migration_options.get('emojis', True):
-                        existing_fluxer_items['emojis'] = await self.fluxer_http.get_guild_emojis(fluxer_guild_id)
+                    if migration_options.get("roles", True):
+                        existing_fluxer_items[
+                            "roles"
+                        ] = await self.fluxer_http.get_guild_roles(fluxer_guild_id)
+                    if migration_options.get("channels", True):
+                        existing_fluxer_items[
+                            "channels"
+                        ] = await self.fluxer_http.get_guild_channels(fluxer_guild_id)
+                    if migration_options.get("emojis", True):
+                        existing_fluxer_items[
+                            "emojis"
+                        ] = await self.fluxer_http.get_guild_emojis(fluxer_guild_id)
+                    if migration_options.get("stickers", True):
+                        existing_fluxer_items[
+                            "stickers"
+                        ] = await self.fluxer_http.get_guild_stickers(fluxer_guild_id)
                 except Exception as e:
-                    self.logger.log(f"Failed to fetch existing Fluxer data: {e}", "WARN")
+                    self.logger.log(
+                        f"Failed to fetch existing Fluxer data: {e}", "WARN"
+                    )
                     existing_fluxer_items = {}
 
             # Fetch full guild data from Discord
@@ -117,30 +163,53 @@ class ServerMigrator:
             roles = []
             channels = []
             emojis = []
+            stickers = []
 
-            if migration_options.get('roles', True):
+            if migration_options.get("roles", True):
                 roles = await self.discord_http.get_guild_roles(guild_id)
 
-            if migration_options.get('channels', True) or migration_options.get('permissions', True):
+            if migration_options.get("channels", True) or migration_options.get(
+                "permissions", True
+            ):
                 channels = await self.discord_http.get_guild_channels(guild_id)
 
-            if migration_options.get('emojis', True):
+            if migration_options.get("emojis", True):
                 emojis = await self.discord_http.get_guild_emojis(guild_id)
 
-            # Migrate in order: roles -> channels -> emojis
-            if migration_options.get('roles', True):
-                await self._migrate_roles(roles, fluxer_guild_id, existing_fluxer_items.get('roles'))
+            if migration_options.get("stickers", True):
+                stickers = await self.discord_http.get_guild_stickers(guild_id)
 
-            if migration_options.get('channels', True):
+            # Migrate in order: roles -> channels -> emojis
+            if migration_options.get("roles", True):
+                await self._migrate_roles(
+                    roles, fluxer_guild_id, existing_fluxer_items.get("roles")
+                )
+
+            if migration_options.get("channels", True):
                 await self._migrate_channels(
                     channels,
                     fluxer_guild_id,
-                    migrate_permissions=migration_options.get('permissions', True),
-                    existing_fluxer_channels=existing_fluxer_items.get('channels')
+                    migrate_permissions=migration_options.get("permissions", True),
+                    existing_fluxer_channels=existing_fluxer_items.get("channels"),
                 )
 
-            if migration_options.get('emojis', True):
-                await self._migrate_emojis(emojis, guild_id, fluxer_guild_id, existing_fluxer_items.get('emojis'))
+            if migration_options.get("emojis", True):
+                await self._migrate_emojis(
+                    emojis,
+                    guild_id,
+                    fluxer_guild_id,
+                    existing_fluxer_items.get("emojis"),
+                    save_to_disk=migration_options.get("save_to_disk", False),
+                )
+
+            if migration_options.get("stickers", True):
+                await self._migrate_stickers(
+                    stickers,
+                    guild_id,
+                    fluxer_guild_id,
+                    existing_fluxer_items.get("stickers"),
+                    save_to_disk=migration_options.get("save_to_disk", False),
+                )
 
             self.logger.log(f"✓ Server '{guild_name}' migrated successfully!")
             return True
@@ -148,13 +217,12 @@ class ServerMigrator:
         except Exception as e:
             self.logger.log(f"Server migration failed: {e}", "ERROR")
             import traceback
+
             traceback.print_exc()
             return False
 
     async def _reorder_roles(
-        self,
-        fluxer_guild_id: str,
-        role_positions: list[dict[str, Any]]
+        self, fluxer_guild_id: str, role_positions: list[dict[str, Any]]
     ):
         """Reorder roles to match Discord hierarchy.
 
@@ -168,33 +236,40 @@ class ServerMigrator:
         self.logger.log("\nReordering roles to match Discord hierarchy...")
 
         # Sort by position (highest first for API)
-        sorted_positions = sorted(role_positions, key=lambda x: x["position"], reverse=True)
+        sorted_positions = sorted(
+            role_positions, key=lambda x: x["position"], reverse=True
+        )
 
         # Fluxer/Discord use PATCH /guilds/{guild_id}/roles with array of {id, position}
         try:
             # Make direct API request since fluxer-py might not have this method
             from fluxer.http import Route
+
             await self.fluxer_http.request(
                 Route("PATCH", "/guilds/{guild_id}/roles", guild_id=fluxer_guild_id),
-                json=sorted_positions
+                json=sorted_positions,
             )
             self.logger.log(f"✓ Reordered {len(sorted_positions)} roles")
         except Exception as e:
             self.logger.log(f"Failed to reorder roles: {e}", "WARN")
-            self.logger.log("(Roles were created but may not be in correct order)", "WARN")
+            self.logger.log(
+                "(Roles were created but may not be in correct order)", "WARN"
+            )
 
     async def _migrate_roles(
         self,
         roles: list[dict[str, Any]],
         fluxer_guild_id: str,
-        existing_fluxer_roles: list[dict[str, Any]] | None = None
+        existing_fluxer_roles: list[dict[str, Any]] | None = None,
     ):
         """Migrate roles from Discord to Fluxer."""
         self.logger.log("\n--- Migrating Roles ---")
 
         # Fetch existing roles if not provided
         if existing_fluxer_roles is None:
-            existing_fluxer_roles = await self.fluxer_http.get_guild_roles(fluxer_guild_id)
+            existing_fluxer_roles = await self.fluxer_http.get_guild_roles(
+                fluxer_guild_id
+            )
 
         # Build a name-to-role map for existing roles
         existing_roles_by_name = {r["name"]: r for r in existing_fluxer_roles}
@@ -208,12 +283,16 @@ class ServerMigrator:
             fluxer_everyone = existing_roles_by_name.get("@everyone")
             if fluxer_everyone:
                 self.role_id_map[everyone_role["id"]] = fluxer_everyone["id"]
-                self.logger.log(f"Mapped @everyone role (Discord: {everyone_role['id']} → Fluxer: {fluxer_everyone['id']})")
+                self.logger.log(
+                    f"Mapped @everyone role (Discord: {everyone_role['id']} → Fluxer: {fluxer_everyone['id']})"
+                )
                 # Add @everyone to positions
-                role_positions_to_set.append({
-                    "id": fluxer_everyone["id"],
-                    "position": everyone_role.get("position", 0)
-                })
+                role_positions_to_set.append(
+                    {
+                        "id": fluxer_everyone["id"],
+                        "position": everyone_role.get("position", 0),
+                    }
+                )
 
         # Skip @everyone role from creation (it already exists)
         roles = [r for r in roles if r.get("name") != "@everyone"]
@@ -234,13 +313,14 @@ class ServerMigrator:
                 fluxer_role_id = existing_role["id"]
                 self.role_id_map[role_id] = fluxer_role_id
                 self.logger.log(f"Skipping role (already exists): {role_name}")
-                self.logger.log(f"  Mapped: Discord {role_id} → Fluxer {fluxer_role_id}")
+                self.logger.log(
+                    f"  Mapped: Discord {role_id} → Fluxer {fluxer_role_id}"
+                )
 
                 # Add to positions for reordering
-                role_positions_to_set.append({
-                    "id": fluxer_role_id,
-                    "position": discord_position
-                })
+                role_positions_to_set.append(
+                    {"id": fluxer_role_id, "position": discord_position}
+                )
                 continue
 
             self.logger.log(f"Creating role: {role_name}")
@@ -262,10 +342,9 @@ class ServerMigrator:
                 self.logger.log(f"  ✓ Role created with ID: {fluxer_role_id}")
 
                 # Add to positions for reordering
-                role_positions_to_set.append({
-                    "id": fluxer_role_id,
-                    "position": discord_position
-                })
+                role_positions_to_set.append(
+                    {"id": fluxer_role_id, "position": discord_position}
+                )
 
                 # Add delay to avoid rate limiting
                 await asyncio.sleep(3.0)
@@ -280,9 +359,7 @@ class ServerMigrator:
             await self._reorder_roles(fluxer_guild_id, role_positions_to_set)
 
     async def _apply_channel_permissions(
-        self,
-        discord_channel: dict[str, Any],
-        fluxer_channel_id: str
+        self, discord_channel: dict[str, Any], fluxer_channel_id: str
     ):
         """Apply permission overwrites to a Fluxer channel.
 
@@ -318,7 +395,7 @@ class ServerMigrator:
                     fluxer_role_id,
                     allow=allow,
                     deny=deny,
-                    type=0  # Role
+                    type=0,  # Role
                 )
                 self.logger.log(f"    Applied permission overwrite for role")
             except Exception as e:
@@ -329,7 +406,7 @@ class ServerMigrator:
         channels: list[dict[str, Any]],
         fluxer_guild_id: str,
         migrate_permissions: bool = True,
-        existing_fluxer_channels: list[dict[str, Any]] | None = None
+        existing_fluxer_channels: list[dict[str, Any]] | None = None,
     ):
         """Migrate channels from Discord to Fluxer."""
         self.logger.log("\n--- Migrating Channels ---")
@@ -337,7 +414,9 @@ class ServerMigrator:
         # Build name-to-channel map for existing channels (if doing partial sync)
         existing_channels_by_name = {}
         if existing_fluxer_channels:
-            existing_channels_by_name = {ch["name"]: ch for ch in existing_fluxer_channels}
+            existing_channels_by_name = {
+                ch["name"]: ch for ch in existing_fluxer_channels
+            }
 
         # Channel types: 0=text, 2=voice, 4=category, 5=announcement, 13=stage, 15=forum
         # First pass: Create categories
@@ -352,11 +431,15 @@ class ServerMigrator:
                 existing_category = existing_channels_by_name[category_name]
                 self.category_id_map[category_id] = existing_category["id"]
                 self.logger.log(f"Skipping category (already exists): {category_name}")
-                self.logger.log(f"  Mapped: Discord {category_id} → Fluxer {existing_category['id']}")
+                self.logger.log(
+                    f"  Mapped: Discord {category_id} → Fluxer {existing_category['id']}"
+                )
 
                 # Apply permissions if enabled (update existing channel permissions)
                 if migrate_permissions:
-                    await self._apply_channel_permissions(category, existing_category["id"])
+                    await self._apply_channel_permissions(
+                        category, existing_category["id"]
+                    )
 
                 continue
 
@@ -382,7 +465,9 @@ class ServerMigrator:
                 await asyncio.sleep(3.0)
 
             except Exception as e:
-                self.logger.log(f"  Failed to create category '{category_name}': {e}", "WARN")
+                self.logger.log(
+                    f"  Failed to create category '{category_name}': {e}", "WARN"
+                )
 
         # Second pass: Create channels
         channel_count = 0
@@ -406,12 +491,18 @@ class ServerMigrator:
                 if channel_name in existing_channels_by_name:
                     existing_channel = existing_channels_by_name[channel_name]
                     self.channel_id_map[channel_id] = existing_channel["id"]
-                    self.logger.log(f"Skipping text channel (already exists): #{channel_name}")
-                    self.logger.log(f"  Mapped: Discord {channel_id} → Fluxer {existing_channel['id']}")
+                    self.logger.log(
+                        f"Skipping text channel (already exists): #{channel_name}"
+                    )
+                    self.logger.log(
+                        f"  Mapped: Discord {channel_id} → Fluxer {existing_channel['id']}"
+                    )
 
                     # Apply permissions if enabled (update existing channel permissions)
                     if migrate_permissions:
-                        await self._apply_channel_permissions(channel, existing_channel["id"])
+                        await self._apply_channel_permissions(
+                            channel, existing_channel["id"]
+                        )
 
                     channel_count += 1
                     continue
@@ -434,12 +525,16 @@ class ServerMigrator:
 
                     # Apply permissions if enabled
                     if migrate_permissions:
-                        await self._apply_channel_permissions(channel, fluxer_channel_id)
+                        await self._apply_channel_permissions(
+                            channel, fluxer_channel_id
+                        )
 
                     channel_count += 1
                     await asyncio.sleep(3.0)
                 except Exception as e:
-                    self.logger.log(f"  Failed to create text channel '{channel_name}': {e}", "WARN")
+                    self.logger.log(
+                        f"  Failed to create text channel '{channel_name}': {e}", "WARN"
+                    )
 
             # Voice channels (2)
             elif channel_type == 2:
@@ -447,12 +542,18 @@ class ServerMigrator:
                 if channel_name in existing_channels_by_name:
                     existing_channel = existing_channels_by_name[channel_name]
                     self.channel_id_map[channel_id] = existing_channel["id"]
-                    self.logger.log(f"Skipping voice channel (already exists): {channel_name}")
-                    self.logger.log(f"  Mapped: Discord {channel_id} → Fluxer {existing_channel['id']}")
+                    self.logger.log(
+                        f"Skipping voice channel (already exists): {channel_name}"
+                    )
+                    self.logger.log(
+                        f"  Mapped: Discord {channel_id} → Fluxer {existing_channel['id']}"
+                    )
 
                     # Apply permissions if enabled (update existing channel permissions)
                     if migrate_permissions:
-                        await self._apply_channel_permissions(channel, existing_channel["id"])
+                        await self._apply_channel_permissions(
+                            channel, existing_channel["id"]
+                        )
 
                     channel_count += 1
                     continue
@@ -475,12 +576,17 @@ class ServerMigrator:
 
                     # Apply permissions if enabled
                     if migrate_permissions:
-                        await self._apply_channel_permissions(channel, fluxer_channel_id)
+                        await self._apply_channel_permissions(
+                            channel, fluxer_channel_id
+                        )
 
                     channel_count += 1
                     await asyncio.sleep(3.0)
                 except Exception as e:
-                    self.logger.log(f"  Failed to create voice channel '{channel_name}': {e}", "WARN")
+                    self.logger.log(
+                        f"  Failed to create voice channel '{channel_name}': {e}",
+                        "WARN",
+                    )
 
             # Forum channels (15) -> Convert to text channel
             elif channel_type == 15:
@@ -488,18 +594,26 @@ class ServerMigrator:
                 if channel_name in existing_channels_by_name:
                     existing_channel = existing_channels_by_name[channel_name]
                     self.channel_id_map[channel_id] = existing_channel["id"]
-                    self.logger.log(f"Skipping forum channel (already exists): {channel_name}")
-                    self.logger.log(f"  Mapped: Discord {channel_id} → Fluxer {existing_channel['id']}")
+                    self.logger.log(
+                        f"Skipping forum channel (already exists): {channel_name}"
+                    )
+                    self.logger.log(
+                        f"  Mapped: Discord {channel_id} → Fluxer {existing_channel['id']}"
+                    )
 
                     # Apply permissions if enabled (update existing channel permissions)
                     if migrate_permissions:
-                        await self._apply_channel_permissions(channel, existing_channel["id"])
+                        await self._apply_channel_permissions(
+                            channel, existing_channel["id"]
+                        )
 
                     channel_count += 1
                     continue
 
                 self.logger.log(f"Converting forum channel to text: {channel_name}")
-                self.logger.log_unsupported("Forum channel", f"Converting '{channel_name}' to text channel")
+                self.logger.log_unsupported(
+                    "Forum channel", f"Converting '{channel_name}' to text channel"
+                )
 
                 try:
                     topic = f"Converted from forum. {channel.get('topic', '')}".strip()
@@ -518,17 +632,23 @@ class ServerMigrator:
 
                     # Apply permissions if enabled
                     if migrate_permissions:
-                        await self._apply_channel_permissions(channel, fluxer_channel_id)
+                        await self._apply_channel_permissions(
+                            channel, fluxer_channel_id
+                        )
 
                     channel_count += 1
                     await asyncio.sleep(3.0)
                 except Exception as e:
-                    self.logger.log(f"  Failed to convert forum '{channel_name}': {e}", "WARN")
+                    self.logger.log(
+                        f"  Failed to convert forum '{channel_name}': {e}", "WARN"
+                    )
 
             # Stage channels (13)
             elif channel_type == 13:
                 self.logger.log(f"Skipping stage channel: {channel_name}")
-                self.logger.log_unsupported("Stage channel", f"Skipped '{channel_name}'")
+                self.logger.log_unsupported(
+                    "Stage channel", f"Skipped '{channel_name}'"
+                )
 
             # Threads (10, 11, 12)
             elif channel_type in [10, 11, 12]:
@@ -538,7 +658,9 @@ class ServerMigrator:
             # Other types
             else:
                 self.logger.log(f"Unknown channel type {channel_type}: {channel_name}")
-                self.logger.log_unsupported(f"Channel type: {channel_type}", f"Skipped '{channel_name}'")
+                self.logger.log_unsupported(
+                    f"Channel type: {channel_type}", f"Skipped '{channel_name}'"
+                )
 
         self.logger.log(f"✓ Migrated {channel_count} channels")
 
@@ -547,7 +669,9 @@ class ServerMigrator:
         emojis: list[dict[str, Any]],
         discord_guild_id: str,
         fluxer_guild_id: str,
-        existing_fluxer_emojis: list[dict[str, Any]] | None = None
+        existing_fluxer_emojis: list[dict[str, Any]] | None = None,
+        save_to_disk: bool = False,
+        base_path: str = "./migrated-data",
     ):
         """Migrate emojis from Discord to Fluxer."""
         self.logger.log("\n--- Migrating Emojis ---")
@@ -555,6 +679,11 @@ class ServerMigrator:
         if not emojis:
             self.logger.log("No emojis to migrate")
             return
+
+        emoji_folder = Path(base_path) / discord_guild_id / "emojis"
+        if save_to_disk:
+            emoji_folder.mkdir(parents=True, exist_ok=True)
+            self.logger.log(f"Saving emojis to: {emoji_folder.absolute()}")
 
         # Build name-to-emoji map for existing emojis (if doing partial sync)
         existing_emojis_by_name = {}
@@ -567,6 +696,7 @@ class ServerMigrator:
             emoji_name = emoji.get("name", "unnamed")
             emoji_id = emoji["id"]
             animated = emoji.get("animated", False)
+            emoji_ext = "gif" if animated else "png"
 
             # Check if emoji already exists (partial sync)
             if emoji_name in existing_emojis_by_name:
@@ -576,9 +706,13 @@ class ServerMigrator:
 
             # Build emoji URL
             emoji_ext = "gif" if animated else "png"
-            emoji_url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{emoji_ext}?size=128"
+            emoji_url = (
+                f"https://cdn.discordapp.com/emojis/{emoji_id}.{emoji_ext}?size=128"
+            )
 
-            self.logger.log(f"Migrating emoji: :{emoji_name}: {'(animated)' if animated else ''}")
+            self.logger.log(
+                f"Migrating emoji: :{emoji_name}: {'(animated)' if animated else ''}"
+            )
 
             try:
                 # Download emoji image
@@ -588,11 +722,20 @@ class ServerMigrator:
                     self.logger.log(f"  Failed to download emoji", "WARN")
                     continue
 
+                # Save to Disk
+                if save_to_disk:
+                    try:
+                        filename = f"{emoji_name}.{emoji_ext}"
+                        filepath = emoji_folder / filename
+                        with open(filepath, "wb") as f:
+                            f.write(emoji_data)
+                        self.logger.log(f" ✓ Saved to disk: {filename}")
+                    except Exception as e:
+                        self.logger.log(f" Failed to save to disk: {e}", "WARN")
+
                 # Upload to Fluxer
                 await self.fluxer_http.create_guild_emoji(
-                    fluxer_guild_id,
-                    name=emoji_name,
-                    image=emoji_data
+                    fluxer_guild_id, name=emoji_name, image=emoji_data
                 )
 
                 self.logger.log(f"  ✓ Emoji created")
@@ -605,3 +748,109 @@ class ServerMigrator:
                 self.logger.log(f"  Failed to create emoji '{emoji_name}': {e}", "WARN")
 
         self.logger.log(f"✓ Migrated {emoji_count} emojis")
+
+    async def _migrate_stickers(
+        self,
+        stickers: list[dict[str, Any]],
+        discord_guild_id: str,
+        fluxer_guild_id: str,
+        existing_fluxer_stickers: list[dict[str, Any]] | None = None,
+        save_to_disk: bool = False,
+        base_path: str = "./migrated-data",
+    ):
+        """Migrate stickers from Discord to Fluxer."""
+        self.logger.log("\n--- Migrating Stickers ---")
+
+        if not stickers:
+            self.logger.log("No stickers to migrate")
+            return
+
+        sticker_folder = Path(base_path) / discord_guild_id / "stickers"
+        if save_to_disk:
+            sticker_folder.mkdir(parents=True, exist_ok=True)
+            self.logger.log(f"Saving stickers to: {sticker_folder.absolute()}")
+
+        # Build name-to-sticker map for existing stickers (if doing partial sync)
+        existing_stickers_by_name = {}
+        if existing_fluxer_stickers:
+            existing_stickers_by_name = {e["name"]: e for e in existing_fluxer_stickers}
+
+        sticker_count = 0
+
+        for sticker in stickers:
+            sticker_name = sticker.get("name", "unnamed")
+            sticker_id = sticker["id"]
+            # Stickers use format_type instead of animated like emojis, 1 = PNG, 2 = APNG, 3 = LOTTIE, 4 = GIF.
+            format_type = sticker.get("format_type", 1)
+            # Set an ignore for LOTTIE as there is no current Fluxer support for it.
+            if format_type == 3:
+                self.logger.log(
+                    f"Skipping Lottie sticker (JSON format not supported): :{sticker_name}:",
+                    "WARN",
+                )
+                continue
+            sticker_ext = "gif" if format_type == 4 else "png"
+            is_animated = format_type in (2, 4)  # APNG or GIF
+
+            # Check if sticker already exists (partial sync)
+            if sticker_name in existing_stickers_by_name:
+                self.logger.log(f"Skipping sticker (already exists): :{sticker_name}:")
+                sticker_count += 1
+                continue
+
+            # Build sticker URL
+            sticker_url = f"https://media.discordapp.net/stickers/{sticker_id}.{sticker_ext}?size=160"
+
+            self.logger.log(
+                f"Migrating sticker: :{sticker_name}: {'(animated)' if is_animated else ''}"
+            )
+
+            try:
+                # Download sticker image
+                sticker_data = await self._download_image(sticker_url)
+
+                if not sticker_data:
+                    self.logger.log(f"  Failed to download sticker", "WARN")
+                    continue
+
+                # Convert APNG to GIF (Fluxer doesn't support APNG properly)
+                if format_type == 2:
+                    gif_data = self._apng_to_gif(sticker_data)
+                    if gif_data:
+                        sticker_data = gif_data
+                        sticker_ext = "gif"
+                    else:
+                        self.logger.log(
+                            f"  Skipping APNG sticker (conversion failed): :{sticker_name}:",
+                            "WARN",
+                        )
+                        continue
+
+                # Save to Disk
+                if save_to_disk:
+                    try:
+                        filename = f"{sticker_name}.{sticker_ext}"
+                        filepath = sticker_folder / filename
+                        with open(filepath, "wb") as f:
+                            f.write(sticker_data)
+                        self.logger.log(f" ✓ Saved to disk: {filename}")
+                    except Exception as e:
+                        self.logger.log(f" Failed to save to disk: {e}", "WARN")
+
+                # Upload to Fluxer
+                await self.fluxer_http.create_guild_sticker(
+                    fluxer_guild_id, name=sticker_name, image=sticker_data
+                )
+
+                self.logger.log(f"  ✓ Sticker created")
+                sticker_count += 1
+
+                # Rate limiting
+                await asyncio.sleep(3.0)
+
+            except Exception as e:
+                self.logger.log(
+                    f"  Failed to create sticker '{sticker_name}': {e}", "WARN"
+                )
+
+        self.logger.log(f"✓ Migrated {sticker_count} stickers")

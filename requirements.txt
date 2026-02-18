@@ -1,3 +1,4 @@
 fluxer.py
 aiohttp>=3.8.0
 inquirer>=3.1.0
+apnggif>=0.1.4

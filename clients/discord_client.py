@@ -5,8 +5,9 @@ This uses the REST API directly with user tokens.
 
 from __future__ import annotations
 
-import aiohttp
 from typing import Any
+
+import aiohttp
 
 
 class DiscordHTTPClient:
@@ -42,7 +43,9 @@ class DiscordHTTPClient:
             if resp.status == 401:
                 raise ValueError("Discord token is invalid or expired")
             if resp.status == 403:
-                raise ValueError("Discord token doesn't have permission for this action")
+                raise ValueError(
+                    "Discord token doesn't have permission for this action"
+                )
             if resp.status >= 400:
                 raise ValueError(f"Discord API error: {resp.status}")
 
@@ -53,7 +56,9 @@ class DiscordHTTPClient:
         user_data = await self.request("GET", "/users/@me")
 
         try:
-            profile_data = await self.request("GET", f"/users/{user_data['id']}/profile")
+            profile_data = await self.request(
+                "GET", f"/users/{user_data['id']}/profile"
+            )
             if "user_profile" in profile_data:
                 user_data.update(profile_data["user_profile"])
         except Exception:
@@ -80,3 +85,7 @@ class DiscordHTTPClient:
     async def get_guild_emojis(self, guild_id: str) -> list[dict[str, Any]]:
         """GET /guilds/{guild_id}/emojis"""
         return await self.request("GET", f"/guilds/{guild_id}/emojis")
+
+    async def get_guild_stickers(self, guild_id: str) -> list[dict[str, Any]]:
+        """GET /guilds/{guild_id}/stickers"""
+        return await self.request("GET", f"/guilds/{guild_id}/stickers")

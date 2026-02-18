@@ -276,7 +276,7 @@ class MigrationOrchestrator:
         print(f"Migration Options for: {discord_guild['name']}")
         print("=" * 80)
         print("\nWhat would you like to migrate?")
-        print("  [1] Everything (roles, channels, permissions, emojis)")
+        print("  [1] Everything (roles, channels, permissions, emojis, stickers)")
         print("  [2] Custom selection")
         print("  [3] Go back / Cancel")
         print("\nℹ️  Navigation: Enter a number, or press Ctrl+C to go back")
@@ -284,11 +284,14 @@ class MigrationOrchestrator:
         choice = input("\nYour choice: ").strip()
 
         if choice == "1":
+            save_to_disk = input("Save emojis and stickers to disk? (y/n) [default: n]: ").strip().lower() == 'y'
             return {
                 'roles': True,
                 'channels': True,
                 'permissions': True,
-                'emojis': True
+                'emojis': True,
+                'stickers': True,
+                'save_to_disk': save_to_disk
             }
 
         elif choice == "2":
@@ -313,6 +316,12 @@ class MigrationOrchestrator:
 
             migrate_emojis = input("Migrate emojis? (y/n): ").strip().lower() == 'y'
             options['emojis'] = migrate_emojis
+            
+            migrate_stickers = input("Migrate stickers? (y/n): ").strip().lower() == 'y'
+            options['stickers'] = migrate_stickers
+
+            save_to_disk = input("Save emojis and stickers to disk? (y/n): ").strip().lower() == 'y'
+            options['save_to_disk'] = save_to_disk
 
             # Summary
             print("\n" + "=" * 80)
@@ -321,6 +330,8 @@ class MigrationOrchestrator:
             print(f"  • Channels: {'✓' if options['channels'] else '✗'}")
             print(f"  • Channel Permissions: {'✓' if options['permissions'] else '✗'}")
             print(f"  • Emojis: {'✓' if options['emojis'] else '✗'}")
+            print(f"  • Stickers: {'✓' if options['stickers'] else '✗'}")
+            print(f"  • Save to disk: {'✓' if options['save_to_disk'] else '✗'}")
             print("=" * 80)
 
             confirm = input("\nProceed with this configuration? (y/n): ").strip().lower()
@@ -401,7 +412,7 @@ class MigrationOrchestrator:
                             if partial_sync:
                                 print(f"\n✓ Will sync missing parts to: {selected_guild['name']}")
                                 print("  ⚠ WARNING: This matches by exact name!")
-                                print("  - Existing roles/channels/emojis will be SKIPPED")
+                                print("  - Existing roles/channels/emojis/stickers will be SKIPPED")
                                 print("  - Only MISSING items will be added")
                                 print("  - Permissions will be updated for matched channels")
                                 print("  - May result in duplicates if names don't match exactly")
